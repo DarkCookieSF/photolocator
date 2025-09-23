@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Find Photo Location (EXIF → Google Maps)</title>
+<!-- exifr (reads EXIF from blobs/ArrayBuffers reliably) -->
+<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+<style>
+  :root{
+    --bg:#0f1724; --card:#0b1220; --accent:#1e90ff; --muted:#9aa4b2; --success:#16a34a; --danger:#ef4444;
+    color-scheme: dark;
+  }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:linear-gradient(180deg,#071022 0%, #081427 100%);color:#e6eef6;display:flex;align-items:flex-start;justify-content:center;padding:28px 12px;min-height:100vh;}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.03);padding:18px;border-radius:12px;max-width:920px;width:100%;box-shadow:0 8px 30px rgba(2,6,23,0.6);}
+  h1{margin:0 0 6px;font-size:20px}
+  p.lead{margin:0 0 14px;color:var(--muted);font-size:13px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .drop{flex:1;min-height:160px;border:2px dashed rgba(255,255,255,0.06);border-radius:10px;padding:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;transition:background .12s, border-color .12s}
+  .drop.dragover{background:rgba(30,144,255,0.04);border-color:rgba(30,144,255,0.25)}
+  .muted{color:var(--muted);font-size:13px}
+  input[type="text"]{background:transparent;border:1px solid rgba(255,255,255,0.04);padding:8px 10px;border-radius:8px;color:inherit;min-width:260px}
+  button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#031528;cursor:pointer;font-weight:600}
+  button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted)}
+  .info{margin-top:12px;font-size:13px}
+  .preview{display:flex;gap:12px;align-items:center;margin-top:12px}
+  .preview img{max-width:160px;max-height:120px;border-radius:8px;border:1px solid rgba(255,255,255,0.03)}
+  .meta{font-size:13px;color:var(--muted)}
+  .error{color:var(--danger);font-weight:600}
+  .success{color:var(--success);font-weight:700}
+  .modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#021220;border-radius:12px;padding:12px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 20px 60px rgba(2,6,23,0.7);z-index:60;max-width:95%;width:860px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column}
+  .modal .top{display:flex;justify-content:space-between;align-items:center;padding-bottom:8px}
+  .modal iframe{border:0;flex:1;border-radius:8px}
+  .small{font-size:12px;color:var(--muted)}
+  .actions{display:flex;gap:8px}
+  footer{margin-top:12px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
+  a.link{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+  <main class="card" role="main" aria-labelledby="title">
+    <h1 id="title">Find where a photo was taken (EXIF → Google Maps)</h1>
+    <p class="lead">Drag & drop an image, paste an image (Ctrl/Cmd+V), or paste an image URL. If the photo contains GPS EXIF, we'll extract coordinates and show a Google Maps popup.</p>
+
+    <div class="controls" aria-hidden="false">
+      <div id="dropzone" class="drop" tabindex="0">
+        <div style="text-align:center">
+          <strong>Drop an image here</strong>
+          <div class="muted">or click to open file picker / paste image</div>
+        </div>
+        <div class="muted small">Supported types: JPG/JPEG (EXIF GPS most common). PNG rarely contains GPS EXIF.</div>
+        <input id="fileInput" type="file" accept="image/*" style="display:none">
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;gap:8px">
+          <input id="urlInput" type="text" placeholder="Paste image URL here (or click Paste URL button)" aria-label="Image URL">
+          <button id="useUrl" class="ghost">Use URL</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="pasteFromClipboard" class="ghost">Paste URL from clipboard</button>
+          <button id="clearBtn" class="ghost">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="status" class="info">
+      <span class="muted">Status:</span> <span id="statusText">Waiting for an image...</span>
+    </div>
+
+    <div id="resultArea" aria-live="polite"></div>
+
+    <footer>
+      <div class="small">Tip: many phones strip EXIF when uploading to social networks. If EXIF missing, location won't be available.</div>
+      <div class="small">Built with <a class="link" href="https://github.com/MikeKovarik/exifr" target="_blank">exifr</a> — no server needed.</div>
+    </footer>
+  </main>
+
+  <!-- Modal for Google Maps -->
+  <div id="mapModal" class="modal" style="display:none">
+    <div class="top">
+      <div>
+        <strong id="locLabel">Location</strong>
+        <div id="coordsLabel" class="small"></div>
+      </div>
+      <div class="actions">
+        <button id="openInNewTab">Open in Google Maps</button>
+        <button id="copyLink">Copy Maps Link</button>
+        <button id="closeModal" class="ghost">Close</button>
+      </div>
+    </div>
+    <iframe id="mapFrame" src="" title="Google Maps location" allowfullscreen></iframe>
+  </div>
+
+<script>
+  // Short helpers & DOM
+  const drop = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const statusText = document.getElementById('statusText');
+  const resultArea = document.getElementById('resultArea');
+  const urlInput = document.getElementById('urlInput');
+  const useUrl = document.getElementById('useUrl');
+  const pasteBtn = document.getElementById('pasteFromClipboard');
+  const mapModal = document.getElementById('mapModal');
+  const mapFrame = document.getElementById('mapFrame');
+  const coordsLabel = document.getElementById('coordsLabel');
+  const locLabel = document.getElementById('locLabel');
+  const openInNewTab = document.getElementById('openInNewTab');
+  const copyLinkBtn = document.getElementById('copyLink');
+  const closeModal = document.getElementById('closeModal');
+  const clearBtn = document.getElementById('clearBtn');
+
+  // Accept click on dropzone to open file picker
+  drop.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => {
+    if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+  });
+
+  // Drag/drop UX
+  ['dragenter','dragover'].forEach(ev => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      drop.classList.add('dragover');
+    });
+  });
+  ['dragleave','drop','dragend'].forEach(ev => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      drop.classList.remove('dragover');
+    });
+  });
+  drop.addEventListener('drop', e => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleFile(f);
+    else {
+      // maybe image in clipboard as DataTransfer item (some browsers)
+      const items = e.dataTransfer.items || [];
+      for (let it of items){
+        if (it.type.startsWith('image/')){
+          const blob = it.getAsFile();
+          if (blob) handleFile(blob);
+          return;
+        }
+      }
+      setStatus('No file found in drop.', true);
+    }
+  });
+
+  // Paste (Ctrl/Cmd+V) handling for file or URL
+  window.addEventListener('paste', async (e) => {
+    // Prefer image file from clipboard
+    const items = e.clipboardData && e.clipboardData.items ? e.clipboardData.items : [];
+    for (let it of items){
+      if (it.type.startsWith('image/')){
+        const blob = it.getAsFile();
+        if (blob) { handleFile(blob); return; }
+      }
+    }
+    // Fallback: text (maybe a URL)
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (text && isProbableURL(text)) {
+      urlInput.value = text;
+      useUrl.click();
+    }
+  });
+
+  // Helper to check probable URL
+  function isProbableURL(s){
+    try { const u = new URL(s); return (u.protocol === 'http:' || u.protocol === 'https:'); }
+    catch(e){ return false; }
+  }
+
+  // Paste URL from clipboard button
+  pasteBtn.addEventListener('click', async () => {
+    try {
+      const txt = await navigator.clipboard.readText();
+      if (!txt) { setStatus('Clipboard is empty or cannot read text.', true); return; }
+      urlInput.value = txt;
+      useUrl.click();
+    } catch (err) {
+      setStatus('Clipboard API denied or not available. Paste manually into the URL field.', true);
+    }
+  });
+
+  // Use URL -> fetch and convert to blob
+  useUrl.addEventListener('click', async () => {
+    const url = urlInput.value.trim();
+    if (!url) { setStatus('Paste an image URL first.', true); return; }
+    if (!isProbableURL(url)){ setStatus('That does not look like a valid URL.', true); return; }
+    setStatus('Fetching image from URL...');
+    try {
+      // fetch as blob (may fail for cross-origin images without CORS)
+      const r = await fetch(url, {mode: 'cors'}); // attempt CORS fetch
+      if (!r.ok) throw new Error('Fetch failed: ' + r.status);
+      const blob = await r.blob();
+      // Ensure it's an image
+      if (!blob.type.startsWith('image/')) throw new Error('URL did not return an image.');
+      handleFile(blob, url);
+    } catch (err) {
+      // Attempt using no-cors (will produce opaque response and unreadable) -> inform user
+      console.error(err);
+      setStatus('Failed to fetch image (CORS or network). Try saving the image and dropping it, or use a CORS-enabled URL.', true);
+    }
+  });
+
+  // Clear
+  clearBtn.addEventListener('click', () => {
+    resultArea.innerHTML = '';
+    statusText.textContent = 'Waiting for an image...';
+    urlInput.value = '';
+  });
+
+  // Core: handle a file/blob
+  async function handleFile(fileOrBlob, sourceUrl = null){
+    setStatus('Processing image — reading EXIF...');
+    resultArea.innerHTML = '';
+    // Show preview
+    const previewDiv = document.createElement('div');
+    previewDiv.className = 'preview';
+    const img = document.createElement('img');
+    img.alt = 'Image preview';
+    const objectUrl = URL.createObjectURL(fileOrBlob);
+    img.src = objectUrl;
+    previewDiv.appendChild(img);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.innerHTML = `<div><strong>File type:</strong> ${fileOrBlob.type || 'unknown'}</div>`;
+    if (sourceUrl) meta.innerHTML += `<div><strong>Source URL:</strong> <span class="small">${escapeHtml(sourceUrl)}</span></div>`;
+    resultArea.appendChild(previewDiv);
+    resultArea.appendChild(meta);
+
+    try {
+      // Use exifr — accepts Blob directly
+      // exifr.parse returns many tags including latitude, longitude, and GPSDateStamp etc.
+      const exif = await window.exifr.parse(fileOrBlob, {translateValues:true, tiff:true, exif:true, gps:true});
+      // exif could be undefined/null
+      if (!exif) { setStatus('No EXIF data found in this image.', true); return; }
+      // Check for lat/lon
+      // exifr provides decimalLatitude/decimalLongitude or latitude/longitude depending on build
+      const lat = exif.latitude ?? exif.decimalLatitude ?? exif.GPSLatitude;
+      const lon = exif.longitude ?? exif.decimalLongitude ?? exif.GPSLongitude;
+      // exifr sometimes returns arrays or weird values, ensure they are numbers
+      const latNum = tryNumber(lat);
+      const lonNum = tryNumber(lon);
+
+      // Show some EXIF summary
+      const exifSummary = document.createElement('pre');
+      exifSummary.style.whiteSpace = 'pre-wrap';
+      exifSummary.style.marginTop = '10px';
+      exifSummary.className = 'small';
+      exifSummary.textContent = generateExifSummary(exif);
+      resultArea.appendChild(exifSummary);
+
+      if (isFiniteNumber(latNum) && isFiniteNumber(lonNum)) {
+        setStatus('Found GPS coordinates! Opening map preview.', false, true);
+        showMap(latNum, lonNum);
+      } else {
+        setStatus('No GPS coordinates found in EXIF (photo not geotagged).', true);
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed to read EXIF from this image. The file might be corrupted or the browser blocked access.', true);
+    } finally {
+      // release object URL
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+    }
+  }
+
+  // Utilities
+  function setStatus(msg, isError = false, isSuccess = false){
+    statusText.textContent = msg;
+    statusText.className = isError ? 'error' : (isSuccess ? 'success' : '');
+  }
+
+  function isFiniteNumber(v){ return typeof v === 'number' && isFinite(v); }
+  function tryNumber(v){
+    if (typeof v === 'number') return v;
+    if (Array.isArray(v) && v.length>=2 && typeof v[0] === 'number' && typeof v[1] === 'number') {
+      // maybe [lat, lon] style (rare)
+      return v[0];
+    }
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function generateExifSummary(exif){
+    // Create a short readable summary of some common tags
+    const lines = [];
+    if (exif.Make || exif.Model) lines.push(`Camera: ${[exif.Make, exif.Model].filter(Boolean).join(' ')}`);
+    if (exif.LensModel) lines.push(`Lens: ${exif.LensModel}`);
+    if (exif.DateTimeOriginal || exif.CreateDate) lines.push(`Date taken: ${exif.DateTimeOriginal ?? exif.CreateDate}`);
+    if (exif.ExposureTime) lines.push(`Exposure: ${exif.ExposureTime}s`);
+    if (exif.FNumber) lines.push(`Aperture: f/${exif.FNumber}`);
+    if (exif.ISO) lines.push(`ISO: ${exif.ISO}`);
+    if (exif.FocalLength) lines.push(`Focal length: ${exif.FocalLength}mm`);
+    if (exif.latitude || exif.longitude || exif.decimalLatitude || exif.decimalLongitude) {
+      const lat = exif.latitude ?? exif.decimalLatitude ?? exif.GPSLatitude;
+      const lon = exif.longitude ?? exif.decimalLongitude ?? exif.GPSLongitude;
+      lines.push(`GPS: ${lat}, ${lon}`);
+    }
+    // fallback: show a few EXIF keys truncated
+    if (lines.length === 0) {
+      lines.push('(EXIF exists but contains no common tags to display.)');
+    }
+    return lines.join('\n');
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  // Show map modal with Google Maps URL (no API key required)
+  function showMap(lat, lon){
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lat + ',' + lon)}`;
+    coordsLabel.textContent = `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`;
+    locLabel.textContent = 'Photo location';
+    mapFrame.src = `https://www.google.com/maps?q=${encodeURIComponent(lat + ',' + lon)}&z=17&output=embed`;
+    mapModal.style.display = 'flex';
+    // update open/copy buttons
+    openInNewTab.onclick = () => window.open(mapsUrl, '_blank');
+    copyLinkBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(mapsUrl);
+        copyLinkBtn.textContent = 'Copied!';
+        setTimeout(()=> copyLinkBtn.textContent = 'Copy Maps Link', 1200);
+      } catch {
+        copyLinkBtn.textContent = 'Copy failed';
+        setTimeout(()=> copyLinkBtn.textContent = 'Copy Maps Link', 1200);
+      }
+    };
+  }
+
+  closeModal.addEventListener('click', () => {
+    mapFrame.src = '';
+    mapModal.style.display = 'none';
+  });
+
+  // Utility: detect numeric lat/lon robustly
+  function safeNumber(x){ const n = Number(x); return Number.isFinite(n) ? n : null; }
+
+  // Escape hatch: allow pressing Esc to close modal
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mapModal.style.display === 'flex') {
+      closeModal.click();
+    }
+  });
+
+  // Small helper: allow user to paste an image URL directly with Enter on input
+  urlInput.addEventListener('keyup', (e) => {
+    if (e.key === 'Enter') useUrl.click();
+  });
+
+  // --- Extra: Web-drag of external images (image URLs dragged from other tabs)
+  // when a user drags an image from another page into the drop zone, dataTransfer may contain items of type 'text/uri-list' or HTML with <img src=...>
+  drop.addEventListener('dragover', e => {
+    // try to extract an image url if present
+    const dt = e.dataTransfer;
+    const types = dt && dt.types ? Array.from(dt.types) : [];
+    if (types.includes('text/uri-list') || types.includes('text/html')){
+      // nothing special, user will drop and drop handler will catch items
+    }
+  });
+
+  // Small security note UI
+  (function showSecurityNote(){
+    const note = document.createElement('div');
+    note.className = 'small muted';
+    note.style.marginTop = '10px';
+    note.innerHTML = '<strong>Privacy:</strong> EXIF reading happens locally in your browser — no files are uploaded to any server.';
+    resultArea.parentNode.insertBefore(note, resultArea);
+  })();
+
+</script>
+</body>
+</html>
